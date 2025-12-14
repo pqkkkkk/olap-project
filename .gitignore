@@ -1,0 +1,12 @@
+airflow/logs
+
+# Ignore all .pyc files
+*.pyc
+
+requirements.md
+*.pdf
+
+hdfs
+data
+
+__pycache__/

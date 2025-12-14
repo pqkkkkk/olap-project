@@ -1,0 +1,13 @@
+# requirements.txt - Dependencies cho POS Simulator và Spark Consumer
+
+# Kafka Producer (POS Simulator)
+kafka-python==2.0.2
+
+# Spark Streaming Consumer  
+pyspark==3.5.0
+
+# Data processing
+pandas==2.1.4
+
+# Utilities
+python-dateutil==2.8.2
