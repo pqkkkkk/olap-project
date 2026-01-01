@@ -12,6 +12,10 @@ from kafka import KafkaProducer
 from kafka.errors import KafkaError
 import logging
 
+RAW_TRANSACTIONS_PATH = '../sample_data/raw_transactions.csv'
+KAKFA_TOPIC = 'credit-card-transactions'
+KAFKA_BOOTSTRAP_SERVERS = 'localhost:9094'
+
 # Cấu hình logging
 logging.basicConfig(
     level=logging.INFO,
@@ -22,9 +26,9 @@ logger = logging.getLogger(__name__)
 
 class POSSimulator:
     def __init__(self, 
-                 bootstrap_servers='localhost:9094',
-                 topic='credit-card-transactions',
-                 csv_file='data/transactions.csv'):
+                 bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                 topic=KAKFA_TOPIC,
+                 csv_file=RAW_TRANSACTIONS_PATH):
         """
         Khởi tạo POS Simulator
         
@@ -183,8 +187,8 @@ def main():
     )
     parser.add_argument(
         '--csv',
-        default='data/transactions.csv',
-        help='CSV file path (default: data/transactions.csv)'
+        default=RAW_TRANSACTIONS_PATH,
+        help='CSV file path (default: sample_data/raw_transactions.csv)'
     )
     parser.add_argument(
         '--min-delay',
