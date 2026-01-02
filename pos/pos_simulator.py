@@ -76,6 +76,40 @@ class POSSimulator:
             logger.error(f"❌ Lỗi khi đọc CSV: {e}")
             return []
     
+    def create_timestamp_from_transaction(self, transaction):
+        """
+        TẠO TIMESTAMP TỪ CSV DATA (Year, Month, Day, Time)
+        
+        Args:
+            transaction: Dictionary chứa transaction data từ CSV
+            
+        Returns:
+            timestamp: String ISO 8601 format (YYYY-MM-DDTHH:mm:ss)
+        """
+        try:
+            # Lấy Year, Month, Day từ CSV
+            year = transaction.get('Year', '').strip()
+            month = transaction.get('Month', '').strip()
+            day = transaction.get('Day', '').strip()
+            time_str = transaction.get('Time', '00:00:00').strip()
+            
+            # Validate dữ liệu
+            if not all([year, month, day]):
+                logger.warning(f"⚠️  Thiếu Year/Month/Day, dùng timestamp hiện tại")
+                return datetime.now().isoformat()
+            
+            # FORMAT: YYYY-MM-DDTHH:mm:ss
+            timestamp = f"{year}-{int(month):02d}-{int(day):02d}T{time_str}"
+            
+            logger.debug(f"✅ Created timestamp: {timestamp} (Year={year}, Month={month}, Day={day}, Time={time_str})")
+            return timestamp
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Lỗi tạo timestamp từ CSV: {e}")
+            logger.warning(f"   Transaction: {transaction}")
+            return datetime.now().isoformat()
+    
+
     def send_transaction(self, transaction):
         """
         Gửi một giao dịch đến Kafka
@@ -88,7 +122,7 @@ class POSSimulator:
             key = transaction.get('Card', '')
             
             # Thêm timestamp
-            transaction['timestamp'] = datetime.now().isoformat()
+            transaction['timestamp'] = self.create_timestamp_from_transaction(transaction)
             
             # Gửi message
             future = self.producer.send(
@@ -105,6 +139,7 @@ class POSSimulator:
                 f"Card: {transaction.get('Card', 'N/A')[:8]}*** | "
                 f"Amount: ${transaction.get('Amount', 'N/A')} | "
                 f"Merchant: {transaction.get('Merchant Name', 'N/A')} | "
+                f"Timestamp: {transaction.get('timestamp')} | "
                 f"Partition: {record_metadata.partition} | "
                 f"Offset: {record_metadata.offset}"
             )

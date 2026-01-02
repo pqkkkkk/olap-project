@@ -7,7 +7,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     from_json, col, to_timestamp, current_timestamp,
     when, date_format, year, month, dayofmonth, hour, minute,
-    regexp_replace, trim, lit, udf, dayofweek, length
+    regexp_replace, trim, lit, udf, dayofweek, length, make_date
 )
 import os
 from pathlib import Path
@@ -45,7 +45,7 @@ class SparkStreamingConsumer:
         self.kafka_topic = kafka_topic
         self.spark = None
 
-        # ✅ Tạo base directories nếu chưa tồn tại
+        # Tạo base directories nếu chưa tồn tại
         base_path = Path("data")
         self.output_path = base_path / "output"
         self.checkpoint_path = base_path / "checkpoint"
@@ -53,7 +53,7 @@ class SparkStreamingConsumer:
         self.output_path.mkdir(parents=True, exist_ok=True)
         self.checkpoint_path.mkdir(parents=True, exist_ok=True)
         
-        # ✅ Tạo subdirectories
+        # Tạo subdirectories
         for subdir in ["valid", "fraud", "error", "invalid"]:
             (self.output_path / subdir).mkdir(parents=True, exist_ok=True)
             (self.checkpoint_path / subdir).mkdir(parents=True, exist_ok=True)
@@ -62,6 +62,12 @@ class SparkStreamingConsumer:
         self.exchange_service = ExchangeRateService()
         self.current_rate = self.exchange_service.get_exchange_rate()
         logger.info(f"💱 Tỉ giá hiện tại: {self.current_rate:,.0f} VND/USD")
+
+        # HDFS configuration
+        self.hdfs_namenode = "namenode:8020"
+        self.hdfs_base_path = f"hdfs://{self.hdfs_namenode}/credit-card/processed"
+        self.hdfs_checkpoint_path = f"hdfs://{self.hdfs_namenode}/credit-card/checkpoint"
+    
     
     def register_exchange_rate_udf(self):
         """
@@ -241,7 +247,9 @@ class SparkStreamingConsumer:
             .withColumn("Errors", trim(col("Errors?"))) \
             .withColumn("Is_Fraud", trim(col("Is Fraud?"))) \
             .withColumn("Processed_Timestamp", 
-                       date_format(current_timestamp(), "yyyy-MM-dd HH:mm:ss"))
+                       date_format(current_timestamp(), "yyyy-MM-dd HH:mm:ss")) \
+            .withColumn("real_date_check", make_date(col("Year"), col("Month"), col("Day"))) \
+            .withColumn("is_valid_date", col("real_date_check").isNotNull())
         
         # 1. Error Transactions: Cột Errors có nội dung (Bất kể Card/Year đúng hay sai)
         error_transactions = processed_df \
@@ -256,15 +264,24 @@ class SparkStreamingConsumer:
         valid_transactions = processed_df \
             .filter((col("Errors").isNull()) | (col("Errors") == "")) \
             .filter(col("Is_Fraud") == "No") \
+            .filter(col("User").isNotNull()) \
+            .filter(col("Card").isNotNull()) \
+            .filter(length(col("Card")) >= 16) \
             .filter(col("Amount_USD").isNotNull() & (col("Amount_USD") > 0)) \
-            .filter(length(col("Card")) >= 16)
+            .filter(col("is_valid_date") == True) 
 
         # 4. Invalid (Phần còn lại): Những cái không Error, không Fraud, nhưng dữ liệu rác
         invalid_df = processed_df \
             .filter((col("Errors").isNull()) | (col("Errors") == "")) \
             .filter(col("Is_Fraud") == "No") \
-            .filter((col("Amount_USD").isNull()) | (col("Amount_USD") <= 0) | (length(col("Card")) < 16)) \
-            .withColumn("invalid_reason", lit("Data format invalid"))
+            .filter((col("Amount_USD").isNull()) 
+                    | (col("Amount_USD") <= 0) 
+                    | (length(col("Card")) < 16)
+                    | (col("is_valid_date") == False)
+                    ) \
+            .withColumn("invalid_reason", 
+                when(col("is_valid_date") == False, lit("Invalid Date"))
+                .otherwise(lit("Data format invalid or missing")))
 
         return valid_transactions, fraud_transactions, error_transactions, invalid_df
     
@@ -488,18 +505,18 @@ class SparkStreamingConsumer:
             logger.info("🗄️  Khởi động HDFS Output...")
             query4 = self.write_to_hdfs(
                 valid_output,
-                "hdfs://localhost:8020/transactions/valid",
-                "hdfs://localhost:8020/checkpoint/valid"
+                f"{self.hdfs_base_path}/valid",
+                f"{self.hdfs_checkpoint_path}/valid"
             )
             query5 = self.write_to_hdfs(
                 fraud_output,
-                "hdfs://localhost:8020/transactions/fraud",
-                "hdfs://localhost:8020/checkpoint/fraud"
+                f"{self.hdfs_base_path}/fraud",
+                f"{self.hdfs_checkpoint_path}/fraud"
             )
             query6 = self.write_to_hdfs(
                 error_output,
-                "hdfs://localhost:8020/transactions/error",
-                "hdfs://localhost:8020/checkpoint/error"
+                f"{self.hdfs_base_path}/error",
+                f"{self.hdfs_checkpoint_path}/error"
             )
             if query4:
                 queries.append(query4)
