@@ -54,7 +54,7 @@ class SparkStreamingConsumer:
         self.checkpoint_path.mkdir(parents=True, exist_ok=True)
         
         # Tạo subdirectories
-        for subdir in ["valid", "fraud", "error", "invalid"]:
+        for subdir in ["valid_transactions"]:
             (self.output_path / subdir).mkdir(parents=True, exist_ok=True)
             (self.checkpoint_path / subdir).mkdir(parents=True, exist_ok=True)
 
@@ -306,7 +306,7 @@ class SparkStreamingConsumer:
         
         return query
     
-    def write_to_hdfs(self, df, hdfs_path, checkpoint_path):
+    def write_to_hdfs(self, df, hdfs_path, checkpoint_path, coalesce_partitions=1):
         """
         Ghi dữ liệu vào HDFS ở định dạng Parquet
         
@@ -317,6 +317,7 @@ class SparkStreamingConsumer:
         """
         try:
             query = df \
+                .coalesce(coalesce_partitions) \
                 .writeStream \
                 .outputMode("append") \
                 .format("parquet") \
@@ -333,7 +334,7 @@ class SparkStreamingConsumer:
             logger.error(f"❌ Không thể ghi vào HDFS: {e}")
             return None
     
-    def write_to_csv(self, df, output_path, checkpoint_path):
+    def write_to_csv(self, df, output_path, checkpoint_path, coalesce_partitions=1):
         """
         Ghi dữ liệu ra CSV file
         
@@ -341,6 +342,7 @@ class SparkStreamingConsumer:
             df: DataFrame để ghi
             output_path: Đường dẫn output
             checkpoint_path: Đường dẫn checkpoint
+            coalesce_partitions: Số partitions sau khi coalesce (default: 1)
         """
         try:
             # ✅ Convert Path to string nếu cần
@@ -348,6 +350,7 @@ class SparkStreamingConsumer:
             checkpoint_path_str = str(checkpoint_path).replace("\\", "/")
             
             query = df \
+                .coalesce(coalesce_partitions) \
                 .writeStream \
                 .outputMode("append") \
                 .format("csv") \
@@ -437,8 +440,6 @@ class SparkStreamingConsumer:
         ]
         
         valid_output = valid_df.select(output_columns)
-        fraud_output = fraud_df.select(output_columns)
-        error_output = error_df.select(output_columns)
         
         queries = []
         
@@ -467,63 +468,23 @@ class SparkStreamingConsumer:
             query_valid = self.write_to_csv(
                 valid_output,
                 self.output_path / "valid_transactions",  # ✅ Sử dụng Path object
-                self.checkpoint_path / "valid"
+                self.checkpoint_path / "valid_transactions",
+                coalesce_partitions=1
             )
             if query_valid:
                 queries.append(query_valid)
             
-            logger.info("🚨 Khởi động Fraud Transactions CSV Output...")
-            query_fraud = self.write_to_csv(
-                fraud_output,
-                self.output_path / "fraud_transactions",
-                self.checkpoint_path / "fraud"
-            )
-            if query_fraud:
-                queries.append(query_fraud)
-    
-            # ✅ THÊM: Ghi error transactions
-            logger.info("⚠️  Khởi động Error Transactions CSV Output...")
-            query_error = self.write_to_csv(
-                error_output,
-                self.output_path / "error_transactions",
-                self.checkpoint_path / "error"
-            )
-            if query_error:
-                queries.append(query_error)
-            
-            logger.info("❌ Khởi động Validation Logs...")
-            query_invalid = self.write_validation_logs(
-                invalid_df,
-                self.output_path / "invalid_transactions",
-                self.checkpoint_path / "invalid"
-            )
-            if query_invalid:
-                queries.append(query_invalid)
-        
         # HDFS output
         if output_type in ["hdfs", "all"]:
             logger.info("🗄️  Khởi động HDFS Output...")
-            query4 = self.write_to_hdfs(
+            query_hdfs = self.write_to_hdfs(
                 valid_output,
                 f"{self.hdfs_base_path}/valid",
-                f"{self.hdfs_checkpoint_path}/valid"
+                f"{self.hdfs_checkpoint_path}/valid",
+                coalesce_partitions=1
             )
-            query5 = self.write_to_hdfs(
-                fraud_output,
-                f"{self.hdfs_base_path}/fraud",
-                f"{self.hdfs_checkpoint_path}/fraud"
-            )
-            query6 = self.write_to_hdfs(
-                error_output,
-                f"{self.hdfs_base_path}/error",
-                f"{self.hdfs_checkpoint_path}/error"
-            )
-            if query4:
-                queries.append(query4)
-            if query5:
-                queries.append(query5)
-            if query6:
-                queries.append(query6)
+            if query_hdfs:
+                queries.append(query_hdfs)
         
         # Chờ tất cả queries
         try:
