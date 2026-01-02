@@ -67,27 +67,42 @@ services:
   namenode:
     image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
     container_name: namenode
+    hostname: namenode
     ports:
       - "9870:9870"
+      - "8020:8020"
     volumes:
       - ./hdfs/namenode:/hadoop/dfs/name
       - ./data:/data
     environment:
       - CLUSTER_NAME=test
+      - HDFS_CONF_dfs_permissions_enabled=false
+      - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
+    networks:
+      - default
 
   datanode:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
     container_name: datanode
+    hostname: datanode
     ports:
       - "9864:9864"
+      - "9866:9866"
+      - "9867:9867"
     volumes:
       - ./hdfs/datanode:/hadoop/dfs/data
     environment:
       - CLUSTER_NAME=test
+      - SERVICE_PRECONDITION=namenode:9870
       - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
       - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
+      - HDFS_CONF_dfs_client_use_datanode_hostname=true
+      - HDFS_CONF_dfs_datanode_use_datanode_hostname=true
+      - HDFS_CONF_dfs_datanode_hostname=datanode
     depends_on:
       - namenode
+    networks:
+      - default
 
   resourcemanager:
     image: bde2020/hadoop-resourcemanager:2.0.0-hadoop3.2.1-java8
@@ -217,3 +232,7 @@ services:
 
 volumes:
   airflow-postgres-db:
+
+networks:
+  default:
+    driver: bridge
