@@ -7,8 +7,10 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     from_json, col, to_timestamp, current_timestamp,
     when, date_format, year, month, dayofmonth, hour, minute,
-    regexp_replace, trim, lit, udf
+    regexp_replace, trim, lit, udf, dayofweek, length
 )
+import os
+from pathlib import Path
 from pyspark.sql.types import (
     StructType, StructField, StringType, IntegerType, 
     DoubleType, TimestampType
@@ -43,6 +45,20 @@ class SparkStreamingConsumer:
         self.kafka_topic = kafka_topic
         self.spark = None
 
+        # ✅ Tạo base directories nếu chưa tồn tại
+        base_path = Path("data")
+        self.output_path = base_path / "output"
+        self.checkpoint_path = base_path / "checkpoint"
+        
+        self.output_path.mkdir(parents=True, exist_ok=True)
+        self.checkpoint_path.mkdir(parents=True, exist_ok=True)
+        
+        # ✅ Tạo subdirectories
+        for subdir in ["valid", "fraud", "error", "invalid"]:
+            (self.output_path / subdir).mkdir(parents=True, exist_ok=True)
+            (self.checkpoint_path / subdir).mkdir(parents=True, exist_ok=True)
+
+
         self.exchange_service = ExchangeRateService()
         self.current_rate = self.exchange_service.get_exchange_rate()
         logger.info(f"💱 Tỉ giá hiện tại: {self.current_rate:,.0f} VND/USD")
@@ -63,6 +79,51 @@ class SparkStreamingConsumer:
         logger.info(f"✅ Đã register UDF convert_usd_to_vnd (rate: {current_rate:,.0f})")
         return convert_usd_to_vnd
         
+    def register_datetime_key_udf(self):
+        """
+        ✅ Register UDF để tạo DateTime_Hour_Key
+        Format: YYYY-MM-DD-HH (ví dụ: 2024-01-15-08)
+        """
+        @udf(returnType=StringType())
+        def create_datetime_hour_key(year, month, day, hour):
+            if year is None or month is None or day is None or hour is None:
+                return None
+            # ✅ Format: YYYY-MM-DD-HH (NOT YYYYMMDDHH)
+            return f"{int(year):04d}-{int(month):02d}-{int(day):02d}-{int(hour):02d}"
+        
+        logger.info(f"✅ Đã register UDF create_datetime_hour_key (format: YYYY-MM-DD-HH)")
+        return create_datetime_hour_key
+    
+    def register_day_of_week_udf(self):
+        """
+        ✅ Register UDF để lấy tên ngày trong tuần
+        """
+        @udf(returnType=StringType())
+        def get_day_of_week(day_of_week_num):
+            if day_of_week_num is None:
+                return None
+            days = ["Sunday", "Monday", "Tuesday", "Wednesday", 
+                   "Thursday", "Friday", "Saturday"]
+            # Spark dayofweek: 1=Sunday, 2=Monday, ..., 7=Saturday
+            return days[int(day_of_week_num) - 1]
+        
+        logger.info(f"✅ Đã register UDF get_day_of_week")
+        return get_day_of_week
+    
+    def register_is_weekend_udf(self):
+        """
+        ✅ Register UDF để xác định weekend
+        """
+        @udf(returnType=StringType())
+        def check_is_weekend(day_of_week_num):
+            if day_of_week_num is None:
+                return None
+            # 1=Sunday, 7=Saturday
+            return "Yes" if int(day_of_week_num) in [1, 7] else "No"
+        
+        logger.info(f"✅ Đã register UDF check_is_weekend")
+        return check_is_weekend
+      
     def create_spark_session(self):
         """Tạo Spark Session với cấu hình Kafka"""
         try:
@@ -130,50 +191,6 @@ class SparkStreamingConsumer:
             logger.error(f"❌ Không thể đọc từ Kafka: {e}")
             return None
     
-    def validate_and_filter(self, df):
-        """
-        Validate và filter dữ liệu
-        Returns: (valid_df, invalid_df, stats)
-        """
-        from pyspark.sql.functions import when, length
-        
-        # 1. Thêm validation flags
-        validated_df = df \
-            .withColumn("is_valid_user", col("User").isNotNull()) \
-            .withColumn("is_valid_card", 
-                    (col("Card").isNotNull()) & (length(col("Card")) >= 16)) \
-            .withColumn("is_valid_date",
-                    (col("Year") >= 2020) & (col("Year") <= 2025) &
-                    (col("Month") >= 1) & (col("Month") <= 12) &
-                    (col("Day") >= 1) & (col("Day") <= 31)) \
-            .withColumn("is_valid_amount",
-                    col("Amount_USD") > 0)
-        
-        # 2. Tổng hợp validation
-        validated_df = validated_df.withColumn(
-            "is_valid_record",
-            col("is_valid_user") & 
-            col("is_valid_card") & 
-            col("is_valid_date") & 
-            col("is_valid_amount")
-        )
-        
-        # 3. Thêm lý do invalid
-        validated_df = validated_df.withColumn(
-            "invalid_reason",
-            when(~col("is_valid_user"), "Invalid User") \
-            .when(~col("is_valid_card"), "Invalid Card") \
-            .when(~col("is_valid_date"), "Invalid Date") \
-            .when(~col("is_valid_amount"), "Invalid Amount") \
-            .otherwise(None)
-        )
-        
-        # 4. Tách valid và invalid
-        valid_df = validated_df.filter(col("is_valid_record"))
-        invalid_df = validated_df.filter(~col("is_valid_record"))
-        
-        return valid_df, invalid_df
-    
     def process_stream(self, kafka_df):
         """
         Xử lý streaming data
@@ -188,17 +205,20 @@ class SparkStreamingConsumer:
             .select(from_json(col("value"), schema).alias("data")) \
             .select("data.*")
         
+        # Register các UDFs
         convert_to_vnd = self.register_exchange_rate_udf()
+        create_datetime_hour_key = self.register_datetime_key_udf()
+        get_day_of_week = self.register_day_of_week_udf()
+        check_is_weekend = self.register_is_weekend_udf()
         
         # Xử lý và làm sạch dữ liệu
         processed_df = parsed_df \
             .withColumn("Amount_USD", 
                        regexp_replace(col("Amount"), "[$,]", "").cast("double")) \
             .withColumn("Amount_VND", convert_to_vnd(col("Amount_USD"))) \
-            .withColumn("Exchange_Rate", lit(self.current_rate)) \
+            .withColumn("Exchange_Rate", lit(int(self.current_rate))) \
             .withColumn("transaction_date", 
                        to_timestamp(col("timestamp"))) \
-            .withColumn("processed_timestamp", current_timestamp()) \
             .withColumn("year", year(col("transaction_date"))) \
             .withColumn("month", month(col("transaction_date"))) \
             .withColumn("day", dayofmonth(col("transaction_date"))) \
@@ -207,24 +227,45 @@ class SparkStreamingConsumer:
             .withColumn("date_str", 
                        date_format(col("transaction_date"), "dd/MM/yyyy")) \
             .withColumn("time_str", 
-                       date_format(col("transaction_date"), "HH:mm:ss"))
+                       date_format(col("transaction_date"), "HH:mm:ss")) \
+            .withColumn("day_of_week_num", dayofweek(col("transaction_date"))) \
+            .withColumn("Day_of_Week", get_day_of_week(col("day_of_week_num"))) \
+            .withColumn("Is_Weekend", check_is_weekend(col("day_of_week_num"))) \
+            .withColumn("DateTime_Hour_Key", 
+                       create_datetime_hour_key(col("year"), col("month"), 
+                                              col("day"), col("hour"))) \
+            .withColumn("Use_Chip", col("Use Chip")) \
+            .withColumn("Merchant_Name", col("Merchant Name")) \
+            .withColumn("Merchant_City", col("Merchant City")) \
+            .withColumn("Merchant_State", col("Merchant State")) \
+            .withColumn("Errors", trim(col("Errors?"))) \
+            .withColumn("Is_Fraud", trim(col("Is Fraud?"))) \
+            .withColumn("Processed_Timestamp", 
+                       date_format(current_timestamp(), "yyyy-MM-dd HH:mm:ss"))
         
-        # ✅ THÊM VALIDATION
-        valid_df, invalid_df = self.validate_and_filter(processed_df)
+        # 1. Error Transactions: Cột Errors có nội dung (Bất kể Card/Year đúng hay sai)
+        error_transactions = processed_df \
+            .filter((col("Errors").isNotNull()) & (col("Errors") != ""))
 
-        # Lọc giao dịch hợp lệ (không có lỗi và không phải fraud)
-        valid_transactions = valid_df \
-            .filter((col("Errors?").isNull()) | (trim(col("Errors?")) == "")) \
-            .filter((col("Is Fraud?") != "Yes"))
-        
-        # Lọc giao dịch fraud
-        fraud_transactions = valid_df \
-            .filter(col("Is Fraud?") == "Yes")
-        
-        # Lọc giao dịch có lỗi
-        error_transactions = valid_df \
-            .filter((col("Errors?").isNotNull()) & (trim(col("Errors?")) != ""))
-    
+        # 2. Fraud Transactions: Is Fraud = Yes (Và không phải là Error)
+        fraud_transactions = processed_df \
+            .filter((col("Errors").isNull()) | (col("Errors") == "")) \
+            .filter(col("Is_Fraud") == "Yes")
+
+        # 3. Valid Transactions: Không Error, Không Fraud, VÀ thỏa mãn điều kiện dữ liệu sạch
+        valid_transactions = processed_df \
+            .filter((col("Errors").isNull()) | (col("Errors") == "")) \
+            .filter(col("Is_Fraud") == "No") \
+            .filter(col("Amount_USD").isNotNull() & (col("Amount_USD") > 0)) \
+            .filter(length(col("Card")) >= 16)
+
+        # 4. Invalid (Phần còn lại): Những cái không Error, không Fraud, nhưng dữ liệu rác
+        invalid_df = processed_df \
+            .filter((col("Errors").isNull()) | (col("Errors") == "")) \
+            .filter(col("Is_Fraud") == "No") \
+            .filter((col("Amount_USD").isNull()) | (col("Amount_USD") <= 0) | (length(col("Card")) < 16)) \
+            .withColumn("invalid_reason", lit("Data format invalid"))
+
         return valid_transactions, fraud_transactions, error_transactions, invalid_df
     
     def write_to_console(self, df, output_mode="append", format_type="complete"):
@@ -285,17 +326,21 @@ class SparkStreamingConsumer:
             checkpoint_path: Đường dẫn checkpoint
         """
         try:
+            # ✅ Convert Path to string nếu cần
+            output_path_str = str(output_path).replace("\\", "/")
+            checkpoint_path_str = str(checkpoint_path).replace("\\", "/")
+            
             query = df \
                 .writeStream \
                 .outputMode("append") \
                 .format("csv") \
-                .option("path", output_path) \
-                .option("checkpointLocation", checkpoint_path) \
+                .option("path", output_path_str) \
+                .option("checkpointLocation", checkpoint_path_str) \
                 .option("header", "true") \
                 .trigger(processingTime='5 seconds') \
                 .start()
             
-            logger.info(f"✅ Đang ghi dữ liệu vào CSV: {output_path}")
+            logger.info(f"✅ Đang ghi dữ liệu vào CSV: {output_path_str}")
             return query
             
         except Exception as e:
@@ -307,18 +352,22 @@ class SparkStreamingConsumer:
         Ghi log các records bị drop
         """
         try:
+            # ✅ Convert Path to string nếu cần
+            output_path_str = str(output_path).replace("\\", "/")
+            checkpoint_path_str = str(checkpoint_path).replace("\\", "/")
+            
             query = invalid_df \
                 .select("Card", "User", "Amount_USD", "invalid_reason", "timestamp") \
                 .writeStream \
                 .outputMode("append") \
                 .format("csv") \
-                .option("path", output_path) \
-                .option("checkpointLocation", checkpoint_path) \
+                .option("path", output_path_str) \
+                .option("checkpointLocation", checkpoint_path_str) \
                 .option("header", "true") \
                 .trigger(processingTime='5 seconds') \
                 .start()
             
-            logger.info(f"✅ Đang ghi validation logs vào: {output_path}")
+            logger.info(f"✅ Đang ghi validation logs vào: {output_path_str}")
             return query
             
         except Exception as e:
@@ -347,11 +396,27 @@ class SparkStreamingConsumer:
         
         # Chọn các cột để output
         output_columns = [
-            "Card", "transaction_date", "date_str", "time_str",
-            "Merchant Name", "Merchant City", "Merchant State",
-            "Amount_USD", "Amount_VND", "Exchange_Rate",
-            "User", "Is Fraud?",
-            "year", "month", "day"
+            "DateTime_Hour_Key",
+            "User",
+            "Card",
+            "Year",
+            "Month",
+            "Day",
+            "Hour",
+            "Day_of_Week",
+            "Is_Weekend",
+            "Amount_USD",
+            "Amount_VND",
+            "Exchange_Rate",
+            "Use_Chip",
+            "Merchant_Name",
+            "Merchant_City",
+            "Merchant_State",
+            "Zip",
+            "MCC",
+            "Errors",
+            "Is_Fraud",
+            "Processed_Timestamp"
         ]
         
         valid_output = valid_df.select(output_columns)
@@ -365,13 +430,14 @@ class SparkStreamingConsumer:
             logger.info("📺 Khởi động Console Output...")
             query1 = self.write_to_console(
                 valid_output.select(
+                    "DateTime_Hour_Key",
                     "Card", 
-                    "Merchant Name", 
+                    "Merchant_Name", 
                     "Amount_USD", 
                     "Amount_VND",      
                     "Exchange_Rate",   
-                    "date_str", 
-                    "time_str"
+                    "Day_of_Week", 
+                    "Is_Weekend"
                 ),
                 output_mode="append",
                 format_type="compact"
@@ -380,25 +446,42 @@ class SparkStreamingConsumer:
         
         # CSV output
         if output_type in ["csv", "all"]:
-            logger.info("📝 Khởi động Validation Logs...")
-            query_invalid = self.write_validation_logs(
-                invalid_df,
-                "data/output/invalid_transactions",
-                "data/checkpoint/invalid"
+            logger.info("📝 Khởi động Valid Transactions CSV Output...")
+            query_valid = self.write_to_csv(
+                valid_output,
+                self.output_path / "valid_transactions",  # ✅ Sử dụng Path object
+                self.checkpoint_path / "valid"
             )
-            if query_invalid:
-                queries.append(query_invalid)
+            if query_valid:
+                queries.append(query_valid)
+            
+            logger.info("🚨 Khởi động Fraud Transactions CSV Output...")
+            query_fraud = self.write_to_csv(
+                fraud_output,
+                self.output_path / "fraud_transactions",
+                self.checkpoint_path / "fraud"
+            )
+            if query_fraud:
+                queries.append(query_fraud)
     
-        # ✅ THÊM: Ghi error transactions
-        if output_type in ["csv", "all"]:
-            logger.info("⚠️  Khởi động Error Transactions Output...")
+            # ✅ THÊM: Ghi error transactions
+            logger.info("⚠️  Khởi động Error Transactions CSV Output...")
             query_error = self.write_to_csv(
                 error_output,
-                "data/output/error_transactions",
-                "data/checkpoint/error"
+                self.output_path / "error_transactions",
+                self.checkpoint_path / "error"
             )
             if query_error:
                 queries.append(query_error)
+            
+            logger.info("❌ Khởi động Validation Logs...")
+            query_invalid = self.write_validation_logs(
+                invalid_df,
+                self.output_path / "invalid_transactions",
+                self.checkpoint_path / "invalid"
+            )
+            if query_invalid:
+                queries.append(query_invalid)
         
         # HDFS output
         if output_type in ["hdfs", "all"]:
@@ -413,10 +496,17 @@ class SparkStreamingConsumer:
                 "hdfs://localhost:8020/transactions/fraud",
                 "hdfs://localhost:8020/checkpoint/fraud"
             )
+            query6 = self.write_to_hdfs(
+                error_output,
+                "hdfs://localhost:8020/transactions/error",
+                "hdfs://localhost:8020/checkpoint/error"
+            )
             if query4:
                 queries.append(query4)
             if query5:
                 queries.append(query5)
+            if query6:
+                queries.append(query6)
         
         # Chờ tất cả queries
         try:
