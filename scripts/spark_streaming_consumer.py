@@ -479,8 +479,8 @@ class SparkStreamingConsumer:
             logger.info("🗄️  Khởi động HDFS Output...")
             query_hdfs = self.write_to_hdfs(
                 valid_output,
-                f"{self.hdfs_base_path}/valid",
-                f"{self.hdfs_checkpoint_path}/valid",
+                f"{self.hdfs_base_path}/valid_transactions",
+                f"{self.hdfs_checkpoint_path}/valid_transactions",
                 coalesce_partitions=1
             )
             if query_hdfs:
