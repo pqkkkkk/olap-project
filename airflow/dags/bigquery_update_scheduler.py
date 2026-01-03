@@ -87,9 +87,37 @@ def list_hdfs_files(hdfs_path: str) -> list:
         return []
 
 
+def extract_partition_values(hdfs_path: str) -> dict:
+    """
+    Extract Year, Month, Day from partition path
+    Example path: /credit-card/processed/valid/Year=2024/Month=1/Day=15/part-00000.parquet
+    """
+    import re
+    
+    partition_values = {}
+    
+    # Extract Year
+    year_match = re.search(r'Year=(\d+)', hdfs_path)
+    if year_match:
+        partition_values['Year'] = int(year_match.group(1))
+    
+    # Extract Month
+    month_match = re.search(r'Month=(\d+)', hdfs_path)
+    if month_match:
+        partition_values['Month'] = int(month_match.group(1))
+    
+    # Extract Day
+    day_match = re.search(r'Day=(\d+)', hdfs_path)
+    if day_match:
+        partition_values['Day'] = int(day_match.group(1))
+    
+    return partition_values
+
+
 def read_parquet_from_hdfs(hdfs_path: str) -> pd.DataFrame:
     """
     Read a Parquet file from HDFS using WebHDFS
+    Also extracts partition columns (Year, Month, Day) from the path
     """
     url = f"{HDFS_NAMENODE}/webhdfs/v1{hdfs_path}?op=OPEN"
     
@@ -105,6 +133,13 @@ def read_parquet_from_hdfs(hdfs_path: str) -> pd.DataFrame:
         
         df = pq.read_table(temp_file).to_pandas()
         os.remove(temp_file)
+        
+        # ✅ Extract partition values from path and add to DataFrame
+        partition_values = extract_partition_values(hdfs_path)
+        for col, value in partition_values.items():
+            df[col] = value
+        
+        logger.info(f"📁 Added partition columns: {partition_values}")
         
         return df
         
@@ -122,7 +157,7 @@ def get_hdfs_partition_path(execution_date: datetime) -> str:
     month = execution_date.month
     day = execution_date.day
     
-    return f"{HDFS_BASE_PATH}/year={year}/month={month}/day={day}"
+    return f"{HDFS_BASE_PATH}/Year={year}/Month={month}/Day={day}"
 
 
 def read_hdfs_data(**context):
@@ -130,9 +165,10 @@ def read_hdfs_data(**context):
     Task 1: Read all Parquet files from HDFS for the current date
     """
     execution_date = context['execution_date']
+    existent_execution_date = datetime.strptime('2024-01-15', '%Y-%m-%d')
     
     # Get partition path for today
-    partition_path = get_hdfs_partition_path(execution_date)
+    partition_path = get_hdfs_partition_path(existent_execution_date)
     logger.info(f"📂 Reading from HDFS partition: {partition_path}")
     
     # List all Parquet files in the partition
@@ -158,6 +194,35 @@ def read_hdfs_data(**context):
     # Combine all DataFrames
     combined_df = pd.concat(all_dfs, ignore_index=True)
     logger.info(f"📊 Total records to upload: {len(combined_df)}")
+    
+    # ✅ Reorder columns to match BigQuery schema
+    expected_columns = [
+        "DateTime_Hour_Key",
+        "User",
+        "Card",
+        "Year",
+        "Month",
+        "Day",
+        "Hour",
+        "Day_of_Week",
+        "Is_Weekend",
+        "Amount_USD",
+        "Amount_VND",
+        "Exchange_Rate",
+        "Use_Chip",
+        "Merchant_Name",
+        "Merchant_City",
+        "Merchant_State",
+        "Zip",
+        "MCC",
+        "Errors",
+        "Is_Fraud",
+        "Processed_Timestamp",
+    ]
+    
+    # Reorder DataFrame columns
+    combined_df = combined_df[expected_columns]
+    logger.info(f"✅ Reordered columns to match BigQuery schema: {list(combined_df.columns)}")
     
     # Save to temp CSV for next task
     temp_path = "/tmp/hdfs_data_for_bigquery.csv"
