@@ -1,8 +1,8 @@
 airflow/logs
 
 
-
-requirements.md
+gcp-service-account.json
+#requirements.md
 *.pdf
 
 hdfs
