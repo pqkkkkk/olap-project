@@ -27,11 +27,10 @@ echo ""
 docker exec -it $CONTAINER_NAME \
     spark-submit \
     --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 \
-    --master local[*] \
     $SCRIPT_PATH \
     --broker kafka-broker:9092 \
     --topic credit-card-transactions \
-    --output console
+    --output hdfs
 
 # Options:
 # --broker: Kafka broker address (default: kafka-broker:9092)
