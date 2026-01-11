@@ -165,7 +165,7 @@ def read_hdfs_data(**context):
     Task 1: Read all Parquet files from HDFS for the current date
     """
     execution_date = context['execution_date']
-    existent_execution_date = datetime.strptime('2024-01-15', '%Y-%m-%d')
+    existent_execution_date = datetime.strptime(datetime.now().strftime('%Y-%m-%d'), '%Y-%m-%d')
     
     # Get partition path for today
     partition_path = get_hdfs_partition_path(existent_execution_date)

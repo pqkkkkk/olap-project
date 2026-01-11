@@ -255,15 +255,12 @@ class SparkStreamingConsumer:
         error_transactions = processed_df \
             .filter((col("Errors").isNotNull()) & (col("Errors") != ""))
 
-        # 2. Fraud Transactions: Is Fraud = Yes (Và không phải là Error)
+        # 2. Fraud Transactions: Is Fraud = Yes 
         fraud_transactions = processed_df \
-            .filter((col("Errors").isNull()) | (col("Errors") == "")) \
             .filter(col("Is_Fraud") == "Yes")
 
-        # 3. Valid Transactions: Không Error, Không Fraud, VÀ thỏa mãn điều kiện dữ liệu sạch
+        # 3. Valid Transactions:
         valid_transactions = processed_df \
-            .filter((col("Errors").isNull()) | (col("Errors") == "")) \
-            .filter(col("Is_Fraud") == "No") \
             .filter(col("User").isNotNull()) \
             .filter(col("Card").isNotNull()) \
             .filter(length(col("Card")) >= 16) \
@@ -440,6 +437,7 @@ class SparkStreamingConsumer:
         ]
         
         valid_output = valid_df.select(output_columns)
+        fraud_output = fraud_df.select(output_columns)
         
         queries = []
         
@@ -473,6 +471,16 @@ class SparkStreamingConsumer:
             )
             if query_valid:
                 queries.append(query_valid)
+
+            logger.info("⚠️  Khởi động Fraud Transactions CSV Output...")
+            query_fraud = self.write_to_csv(
+                fraud_output,
+                self.output_path / "fraud_transactions",
+                self.checkpoint_path / "fraud_transactions",
+                coalesce_partitions=1
+            )
+            if query_fraud:
+                queries.append(query_fraud)
             
         # HDFS output
         if output_type in ["hdfs", "all"]:
@@ -485,6 +493,16 @@ class SparkStreamingConsumer:
             )
             if query_hdfs:
                 queries.append(query_hdfs)
+                
+            logger.info("⚠️  Khởi động Fraud Transactions HDFS Output...")
+            query_hdfs_fraud = self.write_to_hdfs(
+                fraud_output,
+                f"{self.hdfs_base_path}/fraud",
+                f"{self.hdfs_checkpoint_path}/fraud",
+                coalesce_partitions=1
+            )
+            if query_hdfs_fraud:
+                queries.append(query_hdfs_fraud)
         
         # Chờ tất cả queries
         try:
