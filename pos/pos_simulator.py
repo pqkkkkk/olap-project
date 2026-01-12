@@ -88,10 +88,10 @@ class POSSimulator:
         """
         try:
             # Lấy Year, Month, Day từ CSV
-            year = transaction.get('Year', '').strip()
-            month = transaction.get('Month', '').strip()
-            day = transaction.get('Day', '').strip()
-            time_str = transaction.get('Time', '00:00:00').strip()
+            year = str(transaction.get('Year', '')).strip()
+            month = str(transaction.get('Month', '')).strip()
+            day = str(transaction.get('Day', '')).strip()
+            time_str = str(transaction.get('Time', '00:00:00')).strip()
             
             # Validate dữ liệu
             if not all([year, month, day]):
@@ -120,6 +120,12 @@ class POSSimulator:
         try:
             # Tạo key từ Card number để partition theo card
             key = transaction.get('Card', '')
+
+            # Chỉnh Year, Month, Day fields theo ngày hiện tại
+            now = datetime.now()
+            transaction['Year'] = now.year
+            transaction['Month'] = now.month
+            transaction['Day'] = now.day
             
             # Thêm timestamp
             transaction['timestamp'] = self.create_timestamp_from_transaction(transaction)
@@ -139,6 +145,7 @@ class POSSimulator:
                 f"Card: {transaction.get('Card', 'N/A')[:8]}*** | "
                 f"Amount: ${transaction.get('Amount', 'N/A')} | "
                 f"Merchant: {transaction.get('Merchant Name', 'N/A')} | "
+                f"Date: {transaction.get('Day')}/{transaction.get('Month')}/{transaction.get('Year')} | "
                 f"Timestamp: {transaction.get('timestamp')} | "
                 f"Partition: {record_metadata.partition} | "
                 f"Offset: {record_metadata.offset}"
