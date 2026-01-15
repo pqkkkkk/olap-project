@@ -7,6 +7,17 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 import logging
 
+try:
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    import time
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -19,7 +30,7 @@ class ExchangeRateService:
         
         # ✅ 1. Research VCB API endpoint
         self.vcb_api_url = "https://portal.vietcombank.com.vn/Usercontrols/TVPortal.TyGia/pXML.aspx"
-        self.vcb_web_url = "https://portal.vietcombank.com.vn/Personal/TI-GIA/Pages/default.aspx"
+        self.vcb_web_url = "https://www.vietcombank.com.vn/vi-VN/KHCN/Cong-cu-Tien-ich/Ty-gia"
     
     def get_exchange_rate(self, date_str=None):
         """
@@ -45,7 +56,7 @@ class ExchangeRateService:
             self.cache[date_str] = rate
             return rate
         
-        # ✅ 3. Fallback: Web scraping
+        # ✅ 3. Fallback: Web scraping (Selenium)
         rate = self._fetch_from_web()
         if rate:
             self.cache[date_str] = rate
@@ -94,44 +105,81 @@ class ExchangeRateService:
     
     def _fetch_from_web(self):
         """
-        ✅ 3. Fallback: Web scraping từ VCB website
+        ✅ 3. Fallback: Web scraping từ VCB website (Selenium)
+        Sử dụng Selenium vì website load dữ liệu bằng JavaScript
         """
-        try:
-            logger.info("🌐 Đang scrape tỉ giá từ VCB website...")
-            
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            response = requests.get(self.vcb_web_url, headers=headers, timeout=10)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Tìm bảng tỉ giá
-            # Structure có thể thay đổi - cần kiểm tra lại
-            table = soup.find('table', {'id': 'ctl00_Content_ExrateView_GridView1'})
-            if not table:
-                table = soup.find('table', class_='table')
-            
-            if table:
-                rows = table.find_all('tr')
-                for row in rows:
-                    cells = row.find_all('td')
-                    if len(cells) >= 4:
-                        # Cột 0: Currency code
-                        currency = cells[0].text.strip()
-                        if currency == 'USD':
-                            # Cột 3: Transfer rate
-                            transfer_text = cells[3].text.strip()
-                            rate = float(transfer_text.replace(',', ''))
-                            logger.info(f"✅ Web scraping: {rate:,.0f} VND/USD")
-                            return rate
-            
-            raise ValueError("USD rate not found in webpage")
-            
-        except requests.Timeout:
-            logger.warning("⏱️ Web scraping timeout")
+        if not SELENIUM_AVAILABLE:
+            logger.warning("⚠️ Selenium not available, skipping web scraping")
             return None
+        
+        try:
+            logger.info("🌐 Đang scrape tỉ giá từ VCB website (Selenium)...")
+            
+            # Setup Chrome options
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-logging")
+            chrome_options.add_argument("--log-level=3")
+            chrome_options.add_argument(
+                "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            )
+            
+            # Initialize driver
+            driver = webdriver.Chrome(options=chrome_options)
+            
+            try:
+                # Navigate to page
+                driver.get(self.vcb_web_url)
+                
+                # Wait for table to load (max 10 seconds)
+                logger.info("⏳ Waiting for table to load...")
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_all_elements_located((By.TAG_NAME, "table"))
+                )
+                
+                time.sleep(2)  # Extra wait for JS to fully render
+                
+                # Get all tables
+                tables = driver.find_elements(By.TAG_NAME, "table")
+                logger.info(f"📊 Found {len(tables)} tables")
+                
+                # Search for USD in tables
+                for table_idx, table in enumerate(tables):
+                    rows = table.find_elements(By.TAG_NAME, "tr")
+                    
+                    for row_idx, row in enumerate(rows):
+                        cells = row.find_elements(By.TAG_NAME, "td")
+                        
+                        # Skip header row
+                        if len(cells) >= 4 and row_idx > 0:
+                            try:
+                                currency = cells[0].text.strip()
+                                
+                                if currency == "USD":
+                                    # Extract rate from cell 3 (Mua chuyển khoản)
+                                    transfer_text = cells[3].text.strip()
+                                    cleaned = transfer_text.replace(",", "")
+                                    rate = float(cleaned)
+                                    
+                                    # Validate
+                                    if 20000 <= rate <= 30000:
+                                        logger.info(f"✅ Web scraping: {rate:,.0f} VND/USD")
+                                        return rate
+                                    else:
+                                        logger.warning(f"⚠️ Rate {rate:,.0f} out of range")
+                                        return None
+                            except (ValueError, IndexError) as e:
+                                logger.warning(f"⚠️ Error parsing row {row_idx}: {e}")
+                                continue
+                
+                logger.warning("⚠️ USD not found in any table")
+                return None
+                
+            finally:
+                driver.quit()
+        
         except Exception as e:
             logger.warning(f"⚠️ Web scraping error: {e}")
             return None
